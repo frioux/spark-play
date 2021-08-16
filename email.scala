@@ -18,6 +18,27 @@ case class Email(from: String, to: String, subject: String, date: String, realDa
 object TheEmails {
   val dumbEmailAddrRE = new Regex("^.*<([^>]+)>.*$")
 
+  def normalizeEmail(in: String): Option[Timestamp] = {
+    if (in == null) {
+      return None
+    }
+
+    val dumbEmailDateFormat = new SimpleDateFormat("dd MMM yyyy HH:mm:ss Z") // 13 Aug 2021 09:18:14 -0700
+    val str = in
+      .replaceAll("\"?(GM|U)T\"?$", "+0000") // replace UT, GMT, and the rare "GMT" with +0000
+      .replaceAll(" \\([A-Z]+\\)$", "")      // strip " (UTC)" suffix
+      .replaceAll("^.*?, ", "")              // remove "Wed, " prefix
+
+    try {
+      return Some(new Timestamp (dumbEmailDateFormat.parse(str).getTime()))
+    } catch {
+      case ex:Throwable => {
+        println("couldn't parse date because: '" + ex + "'; was trying to parse '" + str + "'")
+        return None
+      }
+    }
+  }
+
   def main(args: Array[String]) {
     val spark = SparkSession
       .builder
@@ -40,31 +61,21 @@ object TheEmails {
       .format("json")
       .load(f)
 
-    var ds = df.as[Email].map({ e =>
-      val newFrom = dumbEmailAddrRE.replaceAllIn(e.from, { m:Match => m.group(1) })
+    var ds = df.as[Email].flatMap({ e =>
+      val from = dumbEmailAddrRE.replaceAllIn(e.from, { m:Match => m.group(1) })
 
-      val newTo = if(e.to != null) {
+      val to = if(e.to != null) {
         dumbEmailAddrRE.replaceAllIn(e.to, { m:Match => m.group(1) })
       } else {
-        ""
+        return Seq()
       }
 
-      val ts:Timestamp = if (e.date != null) {
-        val dumbEmailDateFormat = new SimpleDateFormat("dd MMM yyyy HH:mm:ss Z") // 13 Aug 2021 09:18:14 -0700
-        val dt = e.date.replaceAll("\"?(GM|U)T\"?$", "+0000").replaceAll(" \\([A-Z]+\\)$", "").replaceAll("^.*?, ", "")
-        new Timestamp((try {
-          dumbEmailDateFormat.parse(dt)
-        } catch {
-          case ex:Throwable => {
-            println("couldn't parse date because: '" + ex + "'; was trying to parse '" + dt + "'")
-            new Date(2020, 10, 10)
-          }
-        }).getTime())
-      } else {
-        new Timestamp(1628886577)
+      val date = normalizeEmail(e.date) match {
+        case Some(date) => date
+        case None => return Seq()
       }
 
-      e.copy(from = newFrom, to = newTo, date = "", realDate = ts)
+      Seq(e.copy(from = from, to = to, date = "", realDate = date))
     })
 
     ds.write.format("parquet").save("eg.parquet")
